@@ -18,6 +18,7 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy, trim_nul
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     MambaManager,
+    SlidingWindowManager,
     get_kv_cache_kind,
 )
 from vllm.v1.kv_cache_interface import (
@@ -353,6 +354,8 @@ class KVCacheManager:
         than a lagging group. Such a hit only has a valid Mamba state at its
         boundary if the connector supplies it, so the caller must fall back to
         `get_computed_blocks` to reconcile when no external tokens are found.
+        A shorter sliding-window hit requires reconciliation before querying
+        the connector, since the missing history may precede the transfer.
 
         Non-hybrid models and already-convergent hits use `get_computed_blocks`.
 
@@ -384,6 +387,16 @@ class KVCacheManager:
             return *self.get_computed_blocks(request, max_cache_hit_length), False
 
         num_local = per_group_hits[fa_group_id]
+        if any(
+            hit < num_local
+            and issubclass(group.manager_cls, SlidingWindowManager)
+            and group.prefix_cacheable
+            for group, hit in zip(
+                self.kv_cache_config.kv_cache_groups, per_group_hits, strict=True
+            )
+        ):
+            return *self.get_computed_blocks(request, max_cache_hit_length), False
+
         blocks = self.create_kv_cache_blocks(computed)
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
         return blocks, num_local, 0, min(per_group_hits) < num_local
