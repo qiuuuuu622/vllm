@@ -380,22 +380,18 @@ class KVCacheManager:
         computed, per_group_hits = coordinator.find_longest_cache_hit_per_group(
             request.block_hashes, max_cache_hit_length, request.num_tokens
         )
-        if any(hit > per_group_hits[fa_group_id] for hit in per_group_hits):
-            # A lagging group hit deeper than full attention means its
-            # full-attention blocks were evicted; use the reconciled boundary
-            # that every group agrees on.
-            return *self.get_computed_blocks(request, max_cache_hit_length), False
-
         num_local = per_group_hits[fa_group_id]
-        if any(
-            hit < num_local
-            and issubclass(group.manager_cls, SlidingWindowManager)
-            and group.prefix_cacheable
-            for group, hit in zip(
-                self.kv_cache_config.kv_cache_groups, per_group_hits, strict=True
-            )
-        ):
-            return *self.get_computed_blocks(request, max_cache_hit_length), False
+        groups = self.kv_cache_config.kv_cache_groups
+        # Reconcile if full attention lags another group, or if a sliding
+        # window needs KV before the transfer start. A connector can backfill
+        # lagging recurrent state at the full-attention boundary.
+        for group, hit in zip(groups, per_group_hits, strict=True):
+            if hit > num_local or (
+                hit < num_local
+                and group.prefix_cacheable
+                and issubclass(group.manager_cls, SlidingWindowManager)
+            ):
+                return *self.get_computed_blocks(request, max_cache_hit_length), False
 
         blocks = self.create_kv_cache_blocks(computed)
         # Per-group lookups do not detect an uncached shared prefix (boundary 0).
